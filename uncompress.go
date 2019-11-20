@@ -27,16 +27,24 @@ var Exts = map[string]string{
 // If the file does not have a suffix from Exts,
 // OpenFile falls back to using os.Open.
 func OpenFile(name string) (io.ReadCloser, error) {
+	return OpenFileContext(context.Background(), name)
+}
+
+// OpenFileContext opens the named file for reading, like OpenFile, but permits specifying a context object.
+// Canceling this context will kill the uncompress subprocess (if any) writing to the resulting ReadCloser.
+func OpenFileContext(ctx context.Context, name string) (io.ReadCloser, error) {
 	for ext, prog := range Exts {
 		if strings.HasSuffix(name, "."+ext) {
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(ctx)
 			cmd := exec.CommandContext(ctx, prog, name)
 			r, err := cmd.StdoutPipe()
 			if err != nil {
+				cancel()
 				return nil, err
 			}
 			err = cmd.Start()
 			if err != nil {
+				cancel()
 				return nil, err
 			}
 			return &rwrapper{
