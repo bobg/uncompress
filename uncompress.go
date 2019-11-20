@@ -2,7 +2,9 @@
 package uncompress
 
 import (
+	"context"
 	"io"
+	"io/ioutil"
 	"os"
 	"os/exec"
 	"strings"
@@ -27,7 +29,8 @@ var Exts = map[string]string{
 func OpenFile(name string) (io.ReadCloser, error) {
 	for ext, prog := range Exts {
 		if strings.HasSuffix(name, "."+ext) {
-			cmd := exec.Command(prog, name)
+			ctx, cancel := context.WithCancel(context.Background())
+			cmd := exec.CommandContext(ctx, prog, name)
 			r, err := cmd.StdoutPipe()
 			if err != nil {
 				return nil, err
@@ -36,15 +39,20 @@ func OpenFile(name string) (io.ReadCloser, error) {
 			if err != nil {
 				return nil, err
 			}
-			return &rwrapper{r, cmd}, nil
+			return &rwrapper{
+				r:      r,
+				cmd:    cmd,
+				cancel: cancel,
+			}, nil
 		}
 	}
 	return os.Open(name)
 }
 
 type rwrapper struct {
-	r   io.ReadCloser
-	cmd *exec.Cmd
+	r      io.ReadCloser
+	cmd    *exec.Cmd
+	cancel context.CancelFunc
 }
 
 func (r rwrapper) Read(buf []byte) (int, error) {
@@ -52,15 +60,12 @@ func (r rwrapper) Read(buf []byte) (int, error) {
 }
 
 func (r rwrapper) Close() error {
-	// Discard remaining bytes.
-	var buf [8192]byte
-	for {
-		_, err := r.r.Read(buf[:])
-		if err != nil {
-			break
-		}
-	}
+	// Kill process.
+	r.cancel()
 
-	// Closes r.r.
+	// Discard remaining bytes.
+	io.Copy(ioutil.Discard, r.r)
+
+	// Close r.r.
 	return r.cmd.Wait()
 }
