@@ -2,78 +2,82 @@
 package uncompress
 
 import (
-	"context"
+	"compress/bzip2"
+	"compress/gzip"
 	"io"
-	"io/ioutil"
 	"os"
-	"os/exec"
 	"strings"
+
+	"github.com/ulikunitz/xz"
 )
+
+// An Opener receives a ReadCloser with compressed data and returns a ReadCloser with uncompressed data.
+type Opener = func(io.ReadCloser) (io.ReadCloser, error)
 
 // Exts maps a file suffix to the name of the program to use in OpenFile for uncompressing it.
 // Callers may modify Exts as needed.
-var Exts = map[string]string{
-	"Z":   "zcat",
-	"z":   "zcat",
-	"gz":  "zcat",
-	"bz2": "bzcat",
-	"xz":  "xzcat",
+var Exts = map[string]Opener{
+	"Z":   gzipOpener,
+	"z":   gzipOpener,
+	"gz":  gzipOpener,
+	"bz2": bzip2Opener,
+	"xz":  xzOpener,
 }
 
-// OpenFile opens the named file for reading.
+// Open opens the named file for reading.
 // If the file name has one of several special suffixes,
-// the resulting ReadCloser contains the output of an uncompressing program,
-// determined by Exts.
+// the resulting ReadCloser contains the result of uncompressing the file contents,
+// using the uncompressing method determined by Exts.
 // If the file does not have a suffix from Exts,
 // OpenFile falls back to using os.Open.
-func OpenFile(name string) (io.ReadCloser, error) {
-	return OpenFileContext(context.Background(), name)
-}
-
-// OpenFileContext opens the named file for reading, like OpenFile, but permits specifying a context object.
-// Canceling this context will kill the uncompress subprocess (if any) writing to the resulting ReadCloser.
-func OpenFileContext(ctx context.Context, name string) (io.ReadCloser, error) {
+func Open(name string) (io.ReadCloser, error) {
+	f, err := os.Open(name)
+	if err != nil {
+		return nil, err
+	}
 	for ext, prog := range Exts {
 		if strings.HasSuffix(name, "."+ext) {
-			ctx, cancel := context.WithCancel(ctx)
-			cmd := exec.CommandContext(ctx, prog, name)
-			r, err := cmd.StdoutPipe()
+			r, err := prog(f)
 			if err != nil {
-				cancel()
+				f.Close()
 				return nil, err
 			}
-			err = cmd.Start()
-			if err != nil {
-				cancel()
-				return nil, err
-			}
-			return &rwrapper{
-				r:      r,
-				cmd:    cmd,
-				cancel: cancel,
-			}, nil
+			return r, nil
 		}
 	}
-	return os.Open(name)
+	return f, nil
 }
 
-type rwrapper struct {
-	r      io.ReadCloser
-	cmd    *exec.Cmd
-	cancel context.CancelFunc
+func gzipOpener(underlying io.ReadCloser) (io.ReadCloser, error) {
+	r, err := gzip.NewReader(underlying)
+	return &wrapper{r: r, underlying: underlying}, err
 }
 
-func (r rwrapper) Read(buf []byte) (int, error) {
-	return r.r.Read(buf)
+func bzip2Opener(underlying io.ReadCloser) (io.ReadCloser, error) {
+	return &wrapper{r: io.NopCloser(bzip2.NewReader(underlying)), underlying: underlying}, nil
 }
 
-func (r rwrapper) Close() error {
-	// Kill process.
-	r.cancel()
+func xzOpener(underlying io.ReadCloser) (io.ReadCloser, error) {
+	r, err := xz.NewReader(underlying)
+	return &wrapper{r: io.NopCloser(r), underlying: underlying}, err
+}
 
-	// Discard remaining bytes.
-	io.Copy(ioutil.Discard, r.r)
+type wrapper struct {
+	r          io.ReadCloser
+	underlying io.Closer
+}
 
-	// Close r.r.
-	return r.cmd.Wait()
+func (w *wrapper) Read(p []byte) (int, error) {
+	return w.r.Read(p)
+}
+
+func (w *wrapper) Close() error {
+	if w.r == nil {
+		return nil
+	}
+	err := w.r.Close()
+	w.underlying.Close()
+	w.r = nil
+	w.underlying.Close()
+	return err
 }

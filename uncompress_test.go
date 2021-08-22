@@ -15,7 +15,7 @@ func TestUncompress(t *testing.T) {
 	for _, info := range infos {
 		file := path.Join("testdata", info.Name())
 		t.Run(file, func(t *testing.T) {
-			f, err := OpenFile(file)
+			f, err := Open(file)
 			if err != nil {
 				t.Fatal(err)
 			}
